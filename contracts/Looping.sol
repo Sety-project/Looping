@@ -48,6 +48,24 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         _slippage = slippage;
     }
 
+    function getQuote() external view returns (address) {
+        return this.asset();
+    }
+    function getBase() external view returns (address) {
+        return _base;
+    }
+    function getMaxLTV() external view returns (uint256) {
+        // in bps
+        return _max_ltv;
+    }
+    function getSlippage() external view returns (uint256) {
+        // in bps
+        return _slippage;
+    }
+    function getInterestRateMode() external view returns (DataTypes.InterestRateMode) {
+        return _interestRateMode;
+    }
+
     function depositCalculations(uint depositAmt) private view returns (uint flashLoanAmt, uint minAmountsOut) {
         // compute how much we can flashloan
         // assume assetPrice/liabilityPrice is p from orcacle, but slippage to p*(1+slippage/10000)
@@ -56,13 +74,22 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         // swap new deposit dE and flashLoan dF into dA, worth (dE+dF) / (1+slippage/10000)
         // flashLoan return from loan, so dF = dL
         // solve that...
-        uint assetPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_base);
+        // console.log("depositAmt %d _base %s asset %s", depositAmt, _base, this.asset());
+        // console.log("max_ltv %d _slippage %d", _max_ltv, _slippage);
+        // console.log("AAVE %s AAVE_ORACLE %s", AAVE, AAVE_ORACLE);
+        
+        // uint assetPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_base);
         uint liabilityPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(this.asset());
+        uint assetPrice = liabilityPrice.mulDiv(115,100);
+        // console.log("FXIED multipiplier %s !!!", "1.15");
         (, , uint256 availableBorrowsBase, , , ) = IPool(AAVE).getUserAccountData(address(this));
         uint availableBorrows =  availableBorrowsBase / liabilityPrice;
+        // console.log("assetPrice %d liabilityPrice %d availableBorrows %d", assetPrice, liabilityPrice, availableBorrows);
 
-        flashLoanAmt = (availableBorrows + depositAmt.mulDiv(_max_ltv,(1+_slippage/10000))) / (1-_max_ltv/(1+_slippage/10000));
-        minAmountsOut = (depositAmt + flashLoanAmt).mulDiv(liabilityPrice, assetPrice*(1+_slippage/10000));
+        uint big = 2<<64;
+        flashLoanAmt = big.mulDiv(availableBorrows + depositAmt.mulDiv(_max_ltv,(10000 +_slippage)), big - big.mulDiv(_max_ltv,(10000 +_slippage)));
+        minAmountsOut = (depositAmt + flashLoanAmt).mulDiv(liabilityPrice*10000, assetPrice*(10000+_slippage));
+        // console.log("deposit: flashLoanAmt %d minAmountsOut %d", flashLoanAmt, minAmountsOut);
     } 
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
@@ -76,7 +103,7 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         tokens[0] = IERC20(this.asset());
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encodePacked(Operation.Deposit, minAmountsOut, type(uint256).min);
+        bytes memory userData = abi.encode(Operation.Deposit, minAmountsOut, type(uint256).min);
         
         IVault(BALANCER_FLASHLOAN).flashLoan(IFlashLoanRecipient(this), tokens, amounts, userData);
     }
@@ -93,7 +120,7 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         (uint256 totalCollateralBase, uint256 totalDebtBase, , , , ) = IPool(AAVE).getUserAccountData(address(this));
         
         flashLoanAmt = totalDebtBase.mulDiv(sharesAmt, totalSupply());
-        minAmountsOut = flashLoanAmt.mulDiv(liabilityPrice, _max_ltv*assetPrice*(1+_slippage/10000));
+        minAmountsOut = flashLoanAmt.mulDiv(liabilityPrice*10000, _max_ltv*assetPrice*(10000+_slippage));
     }
 
     function _withdraw(
@@ -110,22 +137,27 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         tokens[0] = IERC20(_base);
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encodePacked(Operation.Withdraw, minAmountsOut, withdrawAmt);
+        bytes memory userData = abi.encode(Operation.Withdraw, minAmountsOut, withdrawAmt);
         
         IVault(BALANCER_FLASHLOAN).flashLoan(IFlashLoanRecipient(this), tokens, amounts, userData);
 
         super._withdraw(caller, receiver, owner, assets, shares);
     }
 
-    // Implement the IFlashLoanRecipient interface
+    /* Implement the IFlashLoanRecipient interface
+    when BALANCER_FLASHLOAN.flashloan is called, it will callback receiveFlashLoan.
+    This is what will call the swap and the borrow.
+    No need to repay explicitly, it will be done automatically by the flashloan contract.
+    */
     function receiveFlashLoan(
         IERC20[] memory tokens,
         uint256[] memory amounts,
         uint256[] memory feeAmounts,
         bytes memory userData
     ) external {
+        require(msg.sender == BALANCER_FLASHLOAN, "Looping: only Balancer can call this function");
         (Operation operation, uint minAmountsOut, uint withdrawAmt) = abi.decode(userData, (Operation, uint256, uint256));
-
+        console.log("operation: %d, minAmountsOut: %d, withdrawAmt: %d", 1, minAmountsOut, withdrawAmt);
         if (operation == Operation.Deposit) {
             _leverage(amounts[0], minAmountsOut);
         } else if (operation == Operation.Withdraw) {
@@ -151,22 +183,23 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
                 assetIn: IAsset(this.asset()),
                 assetOut: IAsset(_base),
                 amount: amountToSwap,
-                userData: "0x"
+                userData: bytes(0x0)
             });
-
             IVault.FundManagement memory funds = IVault.FundManagement({
                 sender:address(this),
                 fromInternalBalance:false,
                 recipient:payable(address(this)),
                 toInternalBalance:false});
             uint limit = minAmountsOut;
-            uint deadline = block.timestamp+60; // 1 minute
+            uint deadline = block.timestamp+600; // 10 minutes
+            console.log("amountCalculated?", amountToSwap);
             uint256 amountCalculated = IVault(BALANCER_SWAP).swap(
                 singleSwap,
                 funds,
                 limit,
                 deadline
             );
+            console.log("amountCalculated %d", amountToSwap);
         }
 
         // deposit base to AAVE
