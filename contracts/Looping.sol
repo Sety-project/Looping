@@ -4,7 +4,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {OwnableERC4626} from "./OwnableERC4626.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
-// import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 
 import {IFlashLoanRecipient} from "@balancer-labs/v2-interfaces/contracts/vault/IFlashLoanRecipient.sol";
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
@@ -16,7 +16,7 @@ import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 // import "lib/forge-std/src/console.sol";
 
-abstract contract Looping is OwnableERC4626 , IFlashLoanRecipient {
+contract Looping is OwnableERC4626 , IFlashLoanRecipient {
     using Math for uint256;
 
     address private constant BALANCER_FLASHLOAN = address(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
@@ -24,24 +24,27 @@ abstract contract Looping is OwnableERC4626 , IFlashLoanRecipient {
     address private constant AAVE_ORACLE = address(0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7);
     address private constant BALANCER_SWAP = address(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
     bytes32 private constant BALANCER_POOL_ID = bytes32(uint256(0x36bf227d6bac96e2ab1ebb5492ecec69c691943f000200000000000000000316));
+    
+    address private immutable _base;
     uint256 private _max_ltv; // in bps
     uint256 private _slippage; // in bps
-    DataTypes.InterestRateMode private _interestRateMode;
+    DataTypes.InterestRateMode private immutable _interestRateMode;
 
     enum Operation {Deposit, Withdraw}
 
-    constructor(address asset, address base, uint256 max_ltv, uint256 slippage) 
-    OwnableERC4626(asset, base) {
+    constructor(address quote, address base, uint256 max_ltv, uint256 slippage)
+    OwnableERC4626(IERC20(quote))
+    {
+        _base = base;
         _max_ltv = max_ltv;
         _slippage = slippage;
         _interestRateMode = DataTypes.InterestRateMode.VARIABLE;
     }
     
-    function setExecutionParams(uint16 max_ltv, uint16 slippage, DataTypes.InterestRateMode interestRateMode) external onlyOwner {
+    function setExecutionParams(uint16 max_ltv, uint16 slippage) external onlyOwner {
         IPool(AAVE).setUserEMode(2);
         _max_ltv = max_ltv;
         _slippage = slippage;
-        _interestRateMode = interestRateMode;
     }
 
     function depositCalculations(uint depositAmt) private view returns (uint flashLoanAmt, uint minAmountsOut) {
