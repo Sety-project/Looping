@@ -14,9 +14,11 @@ but from different locations.
 abstract contract OwnableERC4626 is ERC4626, Ownable {
     using SafeERC20 for IERC20;
     
-    constructor(IERC20 quote)
-    ERC4626(quote)
+    constructor(address quote)
+    ERC4626(IERC20(quote))
+    ERC20("vToken", "vToken")
     Ownable(msg.sender)
+    payable
     {
     }
 }

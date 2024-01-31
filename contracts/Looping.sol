@@ -15,6 +15,7 @@ import {DataTypes} from "@aave/core-v3/contracts/protocol/libraries/types/DataTy
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 // import "lib/forge-std/src/console.sol";
+import "hardhat/console.sol";
 
 contract Looping is OwnableERC4626 , IFlashLoanRecipient {
     using Math for uint256;
@@ -33,7 +34,7 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
     enum Operation {Deposit, Withdraw}
 
     constructor(address quote, address base, uint256 max_ltv, uint256 slippage)
-    OwnableERC4626(IERC20(quote))
+    OwnableERC4626(quote) payable
     {
         _base = base;
         _max_ltv = max_ltv;

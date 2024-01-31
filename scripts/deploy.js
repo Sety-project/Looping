@@ -9,8 +9,8 @@ const hre = require("hardhat");
 async function main() {
   const asset = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";
   const base = "0x5979D7b546E38E414F7E9822514be443A4800529";
-  const ltv = 0.9;
-  const slippage = 0.0001;
+  const ltv = 9000;
+  const slippage = 1;
   const lockedAmount = ethers.parseEther("0.001");
 
   const looping = await hre.ethers.deployContract("Looping", [asset, base, ltv, slippage], {
