@@ -1,6 +1,8 @@
 # Looping
 
-1) deposit
+This is a mulitasset ERC4626 supporting lend and borrow. A leverage strat is executed / unwound upon deposit / withdraw. This is WIP and still exploitable, coverage about 50%, and ERC4626 compatibility is only partially satisfied...
+
+## deposit
 
 Assume existing debt and collateral of ETH value `L` and `A`.
 Denote `px = pxB / pxQ` the price of base/quote in USD using IAAVEOracle.getPrice. Quote is WETH.
@@ -14,6 +16,8 @@ Upon Deposit `assets` quote asset (WETH):
 - refund `flashLoanAmt`
 We need: `flashLoanAmt = ltv * minAmountsOuts * px = alpha * (assets + flashLoanAmt)`
 So: `flashLoanAmt = assets * alpha / 1-alpha`, where `alpha =  ltv / ( 1 + slippage )`
+
+## withdraw
 
 Upon withdraw `shareBps` of the vault, we want to achieve: new totalCollateral  = totalCollateral * (1-shareBps/10000).
 - flashloan quote `flashLoanAmt`
