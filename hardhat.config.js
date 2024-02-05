@@ -1,7 +1,6 @@
 require("@nomicfoundation/hardhat-toolbox");
-require("@nomicfoundation/hardhat-foundry");
+require("@nomicfoundation/hardhat-ethers");
 env = require("dotenv").config();
-const { ethers } = require("@nomicfoundation/hardhat-ethers");
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -10,12 +9,12 @@ module.exports = {
     hardhat: {
       forking: {
         url: process.env.ALCHEMY_ARBITRUM_URL,
-        blockNumber: 176193361,
+        blockNumber: 175173680
       },
-    },
+    }
   },
   etherscan: {
     apiKey: process.env.ETHERSCAN_KEY,
     network: "arbitrum"
-  },
+  }
 };
