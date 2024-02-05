@@ -1,126 +1,179 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
-
+import {ILooping} from "./interface/ILooping.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {OwnableERC4626} from "./OwnableERC4626.sol";
 import {IERC20} from "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC20.sol";
+import {OwnableERC4626} from "./OwnableERC4626.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import {IFlashLoanRecipient} from "@balancer-labs/v2-interfaces/contracts/vault/IFlashLoanRecipient.sol";
 import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {IAsset} from "@balancer-labs/v2-interfaces/contracts/vault/IAsset.sol";
-// import {AaveOracle} from "@aave/core-v3/contracts/misc/AaveOracle.sol";
 import {IAaveOracle} from "@aave/core-v3/contracts/interfaces/IAaveOracle.sol";
 import {DataTypes} from "@aave/core-v3/contracts/protocol/libraries/types/DataTypes.sol";
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
-import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
-// import "lib/forge-std/src/console.sol";
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {LoopingCalculations} from "./utils/LoopingCalculations.sol";
+
 import "hardhat/console.sol";
 
-contract Looping is OwnableERC4626 , IFlashLoanRecipient {
+address constant BALANCER_FLASHLOAN = address(
+    0xBA12222222228d8Ba445958a75a0704d566BF2C8
+);
+address constant AAVE = address(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
+address constant AAVE_ORACLE = address(
+    0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7
+);
+uint24 constant uniswap_fee = 100; // 1bp
+address constant UNISWAP_SWAP = address(
+    0xE592427A0AEce92De3Edee1F18E0157C05861564
+);
+ISwapRouter constant uniswapRouter = ISwapRouter(UNISWAP_SWAP);
+
+// bytes32 constant BALANCER_POOL_ID =
+//     bytes32(
+//         uint256(
+//             0x36bf227d6bac96e2ab1ebb5492ecec69c691943f000200000000000000000316
+//         )
+//     );
+
+contract Looping is ILooping, OwnableERC4626 {
     using Math for uint256;
 
-    address private constant BALANCER_FLASHLOAN = address(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
-    address private constant AAVE = address(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
-    address private constant AAVE_ORACLE = address(0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7);
-    address private constant BALANCER_SWAP = address(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
-    bytes32 private constant BALANCER_POOL_ID = bytes32(uint256(0x36bf227d6bac96e2ab1ebb5492ecec69c691943f000200000000000000000316));
-    
-    address private immutable _base;
-    uint256 private _max_ltv; // in bps
-    uint256 private _slippage; // in bps
-    DataTypes.InterestRateMode private immutable _interestRateMode;
+    Params private params;
+    LoanMetrics private loanMetrics;
+    address private immutable quoteaAToken;
+    address private immutable baseVariableDebtToken;
 
-    enum Operation {Deposit, Withdraw}
+    constructor(
+        address quote,
+        address base,
+        uint256 ltv,
+        uint256 slippage
+    ) OwnableERC4626(quote) {
+        params.quote = quote;
+        params.base = base;
+        params.ltv = ltv;
+        params.slippage = slippage; // slippage includes fees
+        params.interestRateMode = DataTypes.InterestRateMode.VARIABLE;
+        IPool(AAVE).setUserEMode(0);
+        quoteaAToken = (IPool(AAVE).getReserveData(quote)).aTokenAddress;
+        baseVariableDebtToken = (IPool(AAVE).getReserveData(base)).variableDebtTokenAddress;
+    }
 
-    constructor(address quote, address base, uint256 max_ltv, uint256 slippage)
-    OwnableERC4626(quote) payable
+    function setExecutionParams(
+        uint16 ltv,
+        uint16 slippage
+    ) external onlyOwner {
+        params.ltv = ltv;
+        params.slippage = slippage;
+    }
+
+    function getParams() external view returns (ILooping.Params memory) {
+        return params;
+    }
+
+    // make sure to call this before any external call
+    function _cacheLoanInfo() private {
+        loanMetrics.basePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(params.base);
+        loanMetrics.quotePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(params.quote);
+        loanMetrics.quoteBalance = IERC20(params.quote).balanceOf(address(this));
+        loanMetrics.baseBalance = IERC20(params.base).balanceOf(address(this));
+        loanMetrics.totalCollateral = IERC20(quoteaAToken).balanceOf(address(this));
+        loanMetrics.totalDebt = IERC20(baseVariableDebtToken).balanceOf(address(this));
+        emit PrintHoldings(
+            loanMetrics.quoteBalance,
+            loanMetrics.baseBalance,
+            loanMetrics.totalCollateral,
+            loanMetrics.totalDebt
+        );
+    }
+
+    // this refreshes cache, so is not view
+    function printHoldings(string memory text) external {
+        _cacheLoanInfo();        
+        string memory concatenated = string(
+            abi.encodePacked(
+                "quoteBalance ",
+                Strings.toString(loanMetrics.quoteBalance),
+                " baseBalance ",
+                Strings.toString(loanMetrics.baseBalance),
+                " totalCollateral ",
+                Strings.toString(loanMetrics.totalCollateral),
+                " totalDebt ",
+                Strings.toString(loanMetrics.totalDebt)
+            )
+        );
+        console.log("%s: %s", text, concatenated);
+    }
+
+    /* tricky and unsafe ! 
+    super.totalAssets() was _asset.balanceOf(address(this)) but we do not hold on to quote in this contract:
+    what we need is the net valuation
+    BUT: we can't force a refresh upon calling it from outside since it overrides a view function...*/
+    function totalAssets()
+        public
+        view
+        override(IERC4626, ERC4626)
+        returns (uint256)
     {
-        _base = base;
-        _max_ltv = max_ltv;
-        _slippage = slippage;
-        _interestRateMode = DataTypes.InterestRateMode.VARIABLE;
+        assert(IERC20(params.base).balanceOf(address(this)) == 0); // we do not hold on to quote in this contract
+        return
+            loanMetrics.totalCollateral.mulDiv(
+                loanMetrics.basePrice,
+                loanMetrics.quotePrice
+            )
+            - loanMetrics.totalDebt
+            + IERC20(params.quote).balanceOf(address(this));
+        // + IERC20(params.base).balanceOf(address(this)).mulDiv(loanMetrics.basePrice, loanMetrics.quotePrice);
     }
-    
-    function setExecutionParams(uint16 max_ltv, uint16 slippage) external onlyOwner {
-        IPool(AAVE).setUserEMode(2);
-        _max_ltv = max_ltv;
-        _slippage = slippage;
-    }
-
-    function getQuote() external view returns (address) {
-        return this.asset();
-    }
-    function getBase() external view returns (address) {
-        return _base;
-    }
-    function getMaxLTV() external view returns (uint256) {
-        // in bps
-        return _max_ltv;
-    }
-    function getSlippage() external view returns (uint256) {
-        // in bps
-        return _slippage;
-    }
-    function getInterestRateMode() external view returns (DataTypes.InterestRateMode) {
-        return _interestRateMode;
+    // but at least internal calls can force a refresh
+    function refreshTotalAssets() public returns (uint256) {
+        _cacheLoanInfo();
+        return totalAssets();
     }
 
-    function depositCalculations(uint depositAmt) private view returns (uint flashLoanAmt, uint minAmountsOut) {
-        // compute how much we can flashloan
-        // assume assetPrice/liabilityPrice is p from orcacle, but slippage to p*(1+slippage/10000)
-        // there are also starting asset and liability A and L and we look for dL and dA.
-        // ltv contraint: L+dL = max_ltv * (A+dA)
-        // swap new deposit dE and flashLoan dF into dA, worth (dE+dF) / (1+slippage/10000)
-        // flashLoan return from loan, so dF = dL
-        // solve that...
-        // console.log("depositAmt %d _base %s asset %s", depositAmt, _base, this.asset());
-        // console.log("max_ltv %d _slippage %d", _max_ltv, _slippage);
-        // console.log("AAVE %s AAVE_ORACLE %s", AAVE, AAVE_ORACLE);
-        
-        // uint assetPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_base);
-        uint liabilityPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(this.asset());
-        uint assetPrice = liabilityPrice.mulDiv(115,100);
-        // console.log("FXIED multipiplier %s !!!", "1.15");
-        (, , uint256 availableBorrowsBase, , , ) = IPool(AAVE).getUserAccountData(address(this));
-        uint availableBorrows =  availableBorrowsBase / liabilityPrice;
-        // console.log("assetPrice %d liabilityPrice %d availableBorrows %d", assetPrice, liabilityPrice, availableBorrows);
-
-        uint big = 2<<64;
-        flashLoanAmt = big.mulDiv(availableBorrows + depositAmt.mulDiv(_max_ltv,(10000 +_slippage)), big - big.mulDiv(_max_ltv,(10000 +_slippage)));
-        minAmountsOut = (depositAmt + flashLoanAmt).mulDiv(liabilityPrice*10000, assetPrice*(10000+_slippage));
-        // console.log("deposit: flashLoanAmt %d minAmountsOut %d", flashLoanAmt, minAmountsOut);
-    } 
-
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
-        super._deposit(caller, receiver, assets, shares);
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override(ERC4626) {
+        revert("Looping _deposit: not implemented");
+    }
+    function deposit(
+        uint256 assets,
+        address receiver
+    ) public override(IERC4626, ERC4626) returns (uint256 shares) {
+        uint assetsBefore = refreshTotalAssets();
+        mySafeTransferFrom(params.quote, receiver, address(this), assets);
         
         // well,  that assumes we start empty
-        (uint flashLoanAmt, uint minAmountsOut) = depositCalculations(assets);
+        (
+            uint flashLoanAmt,
+            uint amountToSwap,
+            uint minAmountsOut
+        ) = LoopingCalculations._depositCalculations(assets, params, loanMetrics);
 
         // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
         IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(this.asset());
+        tokens[0] = IERC20(params.quote);
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encode(Operation.Deposit, minAmountsOut, type(uint256).min);
-        
-        IVault(BALANCER_FLASHLOAN).flashLoan(IFlashLoanRecipient(this), tokens, amounts, userData);
-    }
+        bytes memory userData = abi.encode(
+            Operation.Deposit,
+            amountToSwap,
+            minAmountsOut,
+            type(uint256).min
+        );
 
-    function withdrawCalculations(uint sharesAmt) private view returns (uint flashLoanAmt, uint minAmountsOut, uint withdrawAmt) {
-        /* for withdraw:
-        - just scale the debt by the ratio of shares then repay that "flashLoanAmt"
-        - can now withdraw flashLoanAmt/max_ltv worth of base asset
-        - swap this into flashLoanAmt/max_ltv*liabilityPrice/assetPrice asset
-        - apply slippage to that => flashLoanAmt*liabilityPrice/(max_ltv*assetPrice asset*(1+slippage/10000))
-        */
-        uint assetPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_base);
-        uint liabilityPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(this.asset());
-        (uint256 totalCollateralBase, uint256 totalDebtBase, , , , ) = IPool(AAVE).getUserAccountData(address(this));
-        
-        flashLoanAmt = totalDebtBase.mulDiv(sharesAmt, totalSupply());
-        minAmountsOut = flashLoanAmt.mulDiv(liabilityPrice*10000, _max_ltv*assetPrice*(10000+_slippage));
+        IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+
+        // last, deposit the assets AFTER costs
+        uint assetsAfter = refreshTotalAssets();
+
+        shares = previewDeposit(assetsAfter - assetsBefore);
+        _mint(receiver, shares);
+
+        emit Deposit(receiver, receiver, assets, shares);
     }
 
     function _withdraw(
@@ -129,19 +182,41 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         address owner,
         uint256 assets,
         uint256 shares
-    ) internal override {
-        (uint flashLoanAmt, uint minAmountsOut, uint withdrawAmt) = withdrawCalculations(shares);
+    ) internal override(ERC4626) {
+        revert("Looping _withdraw: not implemented");
+    }
+    function withdraw(
+        uint256 shares,
+        address receiver,
+        address owner
+    ) public override(IERC4626, ERC4626) returns (uint256 assets) {
+        uint assetsBefore = refreshTotalAssets();
+        
+        uint sharesBps = shares.mulDiv(10000, super.totalSupply());
+        (
+            uint flashLoanAmt,
+            uint amountToSwap,
+            uint minAmountsOut
+        ) = LoopingCalculations._withdrawCalculations(sharesBps, params, loanMetrics);
 
         // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
         IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(_base);
+        tokens[0] = IERC20(params.quote);
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encode(Operation.Withdraw, minAmountsOut, withdrawAmt);
-        
-        IVault(BALANCER_FLASHLOAN).flashLoan(IFlashLoanRecipient(this), tokens, amounts, userData);
+        bytes memory userData = abi.encode(
+            Operation.Deposit,
+            amountToSwap,
+            minAmountsOut
+        );
 
-        super._withdraw(caller, receiver, owner, assets, shares);
+        IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+
+        // sharesAfter = this.totalSupply().mulDiv(sharesBps, 10000);
+        uint assetsAfter = refreshTotalAssets();
+        uint shares = previewWithdraw(assetsAfter - assetsBefore);
+        _burn(owner, shares);
+        mySafeTransferFrom(params.quote, address(this), receiver, assetsAfter - assetsBefore);
     }
 
     /* Implement the IFlashLoanRecipient interface
@@ -155,102 +230,136 @@ contract Looping is OwnableERC4626 , IFlashLoanRecipient {
         uint256[] memory feeAmounts,
         bytes memory userData
     ) external {
-        require(msg.sender == BALANCER_FLASHLOAN, "Looping: only Balancer can call this function");
-        (Operation operation, uint minAmountsOut, uint withdrawAmt) = abi.decode(userData, (Operation, uint256, uint256));
-        console.log("operation: %d, minAmountsOut: %d, withdrawAmt: %d", 1, minAmountsOut, withdrawAmt);
+        require(
+            msg.sender == BALANCER_FLASHLOAN,
+            "Looping: only Balancer can call this function"
+        );
+        (
+            Operation operation,
+            uint amountToSwap,
+            uint minAmountsOut,
+            uint withdrawAmt
+        ) = abi.decode(userData, (Operation, uint256, uint256, uint256));
         if (operation == Operation.Deposit) {
-            _leverage(amounts[0], minAmountsOut);
-        } else if (operation == Operation.Withdraw) {
-            _deleverage(amounts[0], withdrawAmt, minAmountsOut);
-        } else {
-            revert("Looping: unknown operation");
+            _leverage(amounts[0], amountToSwap, minAmountsOut);
         }
+        else {
+            _deleverage(amounts[0], amountToSwap, minAmountsOut);
+        }
+
+        // repay the flashloan
+        // require(
+        //     amounts[0] + feeAmounts[0] <= tokens[0].balanceOf(address(this)),
+        //     "Looping: not enough funds to repay flashloan"
+        // );
+        bool success = tokens[0].transfer(
+            msg.sender,
+            amounts[0] + feeAmounts[0]
+        );
+        // this.printHoldings("after repay");
+        // require(success, "Looping: failed to repay flashloan");
+        // console.log("flashloan repaid");
     }
 
-    function _leverage(uint flashLoanAmt, uint minAmountsOut) private {
-        // swap this.asset() for base
-        uint256 amountToSwap = IERC20(this.asset()).balanceOf(address(this));
-        if (IERC20(this.asset()).allowance(address(this), BALANCER_SWAP) < amountToSwap)
-        {
-            bool success = IERC20(this.asset()).approve(BALANCER_SWAP, amountToSwap);
-            require(success, "Looping: failed to approve this.asset() for ONEINCH");
+    function _swapExactInputSingle(
+        address tokenIn,
+        address tokenOut,
+        uint24 poolFee,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) private returns (uint256 amountOut) {
+        // Approve the router to spend the input token
+        if (IERC20(tokenIn).allowance(address(this), UNISWAP_SWAP) < amountIn) {
+            bool success = IERC20(tokenIn).approve(UNISWAP_SWAP, amountIn + 1);
+            require(success, "Looping: failed to approve tokenIn");
         }
-        
-        {
-            IVault.SingleSwap memory singleSwap = IVault.SingleSwap({
-                poolId: BALANCER_POOL_ID,
-                kind: IVault.SwapKind.GIVEN_IN,
-                assetIn: IAsset(this.asset()),
-                assetOut: IAsset(_base),
-                amount: amountToSwap,
-                userData: bytes(0x0)
+
+        // Set the swap parameters
+        ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter
+            .ExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                fee: poolFee,
+                recipient: address(this), // send the output to the caller
+                deadline: block.timestamp + 6000, // use current block timestamp as deadline
+                amountIn: amountIn,
+                amountOutMinimum: minAmountOut, // accept any amount of output token
+                sqrtPriceLimitX96: uint160(
+                    uint(2 << 96).mulDiv(
+                        Math.sqrt(amountIn),
+                        Math.sqrt(minAmountOut)
+                    )
+                )
             });
-            IVault.FundManagement memory funds = IVault.FundManagement({
-                sender:address(this),
-                fromInternalBalance:false,
-                recipient:payable(address(this)),
-                toInternalBalance:false});
-            uint limit = minAmountsOut;
-            uint deadline = block.timestamp+600; // 10 minutes
-            console.log("amountCalculated?", amountToSwap);
-            uint256 amountCalculated = IVault(BALANCER_SWAP).swap(
-                singleSwap,
-                funds,
-                limit,
-                deadline
-            );
-            console.log("amountCalculated %d", amountToSwap);
-        }
+        this.printHoldings("before swap");
+        console.log("amountIn %d, allowance %d", amountIn, IERC20(tokenIn).allowance(address(this), UNISWAP_SWAP));
+        // Execute the swap and return the amount of output token
+        amountOut = uniswapRouter.exactInputSingle(swapParams);
+        this.printHoldings("after swap");
+    }
 
-        // deposit base to AAVE
+    function _leverage(
+        uint flashLoanAmt,
+        uint amountToSwap,
+        uint minAmountsOut
+    ) private {
+        // swap params.quote for base
+        uint256 amountCalculated = _swapExactInputSingle(
+            params.quote,
+            params.base,
+            uniswap_fee,
+            amountToSwap,
+            minAmountsOut
+        );
+        // deposit base into AAVE
         {
-            bool success = IERC20(_base).approve(AAVE, IERC20(_base).balanceOf(address(this)));
-            require(success, "Looping: failed to approve stETH for AAVE");
+            bool success = IERC20(params.base).approve(AAVE, amountCalculated);
+            // require(success, "Looping: failed to approve stETH for AAVE");
         }
-        IPool(AAVE).supply(_base, IERC20(_base).balanceOf(address(this)), address(this), 0);
-
+        // this.printHoldings("before supply");
+        IPool(AAVE).supply(params.base, amountCalculated, address(this), 0);
+        // DataTypes.ReserveData memory reserveData = IPool(AAVE).getReserveData(address(this));
+        // this.printHoldings("after supply");
         // borrow asset from AAVE to repay flashloan
-        IPool(AAVE).borrow(this.asset(), flashLoanAmt, uint256(_interestRateMode), 0, address(this));
+        IPool(AAVE).borrow(
+            params.quote,
+            flashLoanAmt,
+            uint256(params.interestRateMode),
+            0,
+            address(this)
+        );
+        // this.printHoldings("after borrow");
     }
 
-    function _deleverage(uint flashLoanAmt, uint lendAmt, uint minAmountsOut) private {
-        // repay this.asset() from AAVE
-        IPool(AAVE).repay(this.asset(), flashLoanAmt, uint256(_interestRateMode), address(this));
-
+    function _deleverage(
+        uint flashLoanAmt,
+        uint amountToSwap,
+        uint minAmountsOut
+    ) private {
+        // repay params.quote from AAVE
+        uint amountToRepay = flashLoanAmt;
+        {
+            bool success = IERC20(params.quote).approve(AAVE, amountToRepay);
+            // require(success, "Looping: failed to approve stETH for AAVE");
+        }
+        IPool(AAVE).repay(
+            params.quote,
+            amountToRepay,
+            uint256(params.interestRateMode),
+            address(this)
+        );
+        
         // withdraw base from AAVE
-        IPool(AAVE).withdraw(_base, lendAmt, address(this));
-        
-        // swap base for this.asset()
-        uint256 amountToSwap = IERC20(_base).balanceOf(address(this));
-        if (IERC20(_base).allowance(address(this), BALANCER_SWAP) < amountToSwap)
-        {
-            bool success = IERC20(_base).approve(BALANCER_SWAP, amountToSwap);
-            require(success, "Looping: failed to approve _base for ONEINCH");
-        }
-        
-        {
-            IVault.SingleSwap memory singleSwap = IVault.SingleSwap({
-                poolId: BALANCER_POOL_ID,
-                kind: IVault.SwapKind.GIVEN_IN,
-                assetOut: IAsset(this.asset()),
-                assetIn: IAsset(_base),
-                amount: amountToSwap,
-                userData: "0x"
-            });
+        uint unsupplyAmt = amountToSwap;
+        IPool(AAVE).withdraw(params.base, unsupplyAmt, address(this));
 
-            IVault.FundManagement memory funds = IVault.FundManagement({
-                sender:address(this),
-                fromInternalBalance:false,
-                recipient:payable(address(this)),
-                toInternalBalance:false});
-            uint limit = minAmountsOut;
-            uint deadline = block.timestamp+60; // 1 minute
-            uint256 amountCalculated = IVault(BALANCER_SWAP).swap(
-                singleSwap,
-                funds,
-                limit,
-                deadline
-            );
-        }
+        // swap base for params.quote
+        _swapExactInputSingle(
+            params.base,
+            params.quote,
+            uniswap_fee,
+            amountToSwap,
+            minAmountsOut
+        );
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
@@ -20,5 +20,10 @@ abstract contract OwnableERC4626 is ERC4626, Ownable {
     Ownable(msg.sender)
     payable
     {
+    }
+
+    function mySafeTransferFrom(address token, address from, address to, uint value) internal
+    {
+        SafeERC20.safeTransferFrom(IERC20(token), from, to, value);
     }
 }
