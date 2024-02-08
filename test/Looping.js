@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+// const { ethers } = require("@nomicfoundation/hardhat-ethers");
 // require("hardhat-etherscan-abi"); // force installed. clashes with @nomicfoundation/hardhat-ethers: wants @nomiclabs/hardhat-ethers
 
 const fs = require("fs");
@@ -95,33 +96,23 @@ describe("Looping", function () {
     const aaveOracleContract = new ethers.Contract(AAVEORACLE_ADDRESS, AAVEORACLE_ABI, owner);
     const WethValue = await aaveOracleContract.getAssetPrice(WETH_ADDRESS);
     const WstethValue = await aaveOracleContract.getAssetPrice(WSTETH_ADDRESS);
-    
-    asset = BigInt(1e18);
-    quoteBalance = 0n;
-    baseBalance = 0n;
-    totalCollateral = asset;
-    totalDebt = 0n;
 
-    await looping.deposit(asset, owner);
-    await looping.printHoldings("js deposit1");
-    // {quoteBalance, baseBalance, totalCollateralBase, totalDebtBase}
-
-    big = BigInt(10e28);
-    flashLoanAmt = big*(
-      0n +
-      asset*max_ltv/(10000n + slippage))/
-      (big - big*max_ltv/(10000n + slippage));
-    console.log("flashLoanAmt: ", flashLoanAmt);
+    const assets = 1000000000000000000n;
+    await looping.deposit(assets, owner.address);  
+    // await looping.printHoldings("js deposit1");
   });
 
-  it("Should deposit and loop", async function () {
+  it("Should deposit and withdraw", async function () {
     const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
     const assets = 1000000000000000000n;
     const slippageBps = 100n;
     
-    await looping.printHoldings("js before deposit");
-    await looping.deposit(assets, owner);
-    await looping.printHoldings("js deposit");
+    const depositResponse = await looping.deposit(assets, owner.address);
+    // const depositReceipt = await depositResponse.wait();
+    // const events = depositReceipt.logs.filter(
+    //   item=>(item.address == looping.target) && (item.eventName == "Deposit"));
+    // events.forEach(event => {event.topics.forEach(topic => {console.log(toBigInt(topic))})});
+    await looping.withdraw(0n, owner, owner);
     
     await expect(looping.withdraw(assets, owner, owner)).to.approximately(assets, assets * slippageBps / 10000n);
     await looping.printHoldings("js withdraw");

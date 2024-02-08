@@ -76,7 +76,7 @@ library LoopingCalculations {
         flashLoanAmt = amountToRepay;
         
         console.log(
-            "flashLoanAmt %d unsupplyAmt %d amountToSwap %d amountToRepay %d",
+            "flashLoanAmt %d unsupplyAmt %d amountToSwap %d",
             flashLoanAmt,
             unsupplyAmt,
             amountToSwap
