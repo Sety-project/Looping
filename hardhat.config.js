@@ -1,5 +1,6 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("@nomicfoundation/hardhat-ethers");
+require("hardhat-tracer");
 env = require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
@@ -11,6 +12,9 @@ module.exports = {
         url: process.env.ALCHEMY_ARBITRUM_URL,
         blockNumber: 175173680
       },
+    },
+    hardhat_local: {
+      url: "http://127.0.0.1:8545/"
     }
   },
   etherscan: {

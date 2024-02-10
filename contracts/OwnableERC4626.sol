@@ -17,7 +17,7 @@ abstract contract OwnableERC4626 is ERC4626, Ownable {
     constructor(address quote)
     ERC4626(IERC20(quote))
     ERC20("vToken", "vToken")
-    Ownable(msg.sender)
+    Ownable(_msgSender())
     payable
     {
     }

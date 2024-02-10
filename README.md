@@ -28,7 +28,7 @@ replayFlash 0                       0                       `flashLoanAmt`      
 
 ## withdraw
 
-Upon withdraw `shareBps` of the vault, we want to achieve: new totalCollateral  = totalCollateral * (1-shareBps/10000).
+Upon withdraw `shares` of the vault, we want to achieve: new totalCollateral  = totalCollateral * (1-shares/totalSupply).
 - flashloan quote `flashLoanAmt`
 - repay quote `amountToRepay = flashLoanAmt`
 - un-supply base `withdrawAmt = totalCollateral * shareBps / 10000`. For this to be allowed we need `new debt = max_ltv * new collateral`, which solves to `flashLoanAmt = max(0, totalDebt - max_ltv * (totalCollateral-withdrawAmt))`. Please note this is `max_ltv` allowed by the vault, more efficient than `ltv` used.
@@ -36,7 +36,7 @@ Upon withdraw `shareBps` of the vault, we want to achieve: new totalCollateral  
 - `amountCalculated > minAmountsOuts = withdrawAmt * px / ( 1 + slippage )`.
 - repay flashloan
 - refresh loanInfo and return quote balance.
-- do not call super.deposit, but _burn the right amount based on refreshed LoanInfo.
+- do not call super.withdraw, but _burn.
 
 ### balances trajectory (for sharesBps = 10000, 0 slippage). amountToSwap = totalCollateral * shareBps:
 step        quote                   base                   dQuote               aBase

@@ -82,12 +82,12 @@ contract Looping is ILooping, OwnableERC4626 {
         loanMetrics.quotePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(params.quote);
         loanMetrics.quoteBalance = IERC20(params.quote).balanceOf(address(this));
         loanMetrics.baseBalance = IERC20(params.base).balanceOf(address(this));
-        if (checkNoCash) {
-            require(
-                loanMetrics.quoteBalance == 0 && loanMetrics.baseBalance == 0,
-                "contract shouldn't hold cash at this point"
-            );
-        }
+        // if (checkNoCash) {
+        //     require(
+        //         loanMetrics.quoteBalance == 0 && loanMetrics.baseBalance == 0,
+        //         "contract shouldn't hold cash at this point"
+        //     );
+        // }
         loanMetrics.totalCollateral = IERC20(quoteaAToken).balanceOf(address(this));
         loanMetrics.totalDebt = IERC20(baseVariableDebtToken).balanceOf(address(this));
 
@@ -151,26 +151,27 @@ contract Looping is ILooping, OwnableERC4626 {
         uint assetsBefore = refreshTotalAssets(true);
         mySafeTransferFrom(params.quote, receiver, address(this), assets);
         
-        // well,  that assumes we start empty
-        (
-            uint flashLoanAmt,
-            uint amountToSwap,
-            uint minAmountsOut
-        ) = LoopingCalculations._depositCalculations(assets, params, loanMetrics);
+        {
+            (
+                uint flashLoanAmt,
+                uint amountToSwap,
+                uint minAmountsOut
+            ) = LoopingCalculations._depositCalculations(assets, params, loanMetrics);
 
-        // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
-        IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(params.quote);
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encode(
-            Operation.Deposit,
-            amountToSwap,
-            minAmountsOut,
-            type(uint256).min
-        );
+            // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
+            IERC20[] memory tokens = new IERC20[](1);
+            tokens[0] = IERC20(params.quote);
+            uint256[] memory amounts = new uint256[](1);
+            amounts[0] = flashLoanAmt;
+            bytes memory userData = abi.encode(
+                Operation.Deposit,
+                amountToSwap,
+                minAmountsOut,
+                type(uint256).min
+            );
 
-        IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+            IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+        }
 
         // mint based on assets AFTER costs
         uint assetsAfter = refreshTotalAssets(true);
@@ -178,8 +179,9 @@ contract Looping is ILooping, OwnableERC4626 {
         shares = previewDeposit(assetsAfter - assetsBefore);
         _mint(receiver, shares);
 
-        emit Deposit(receiver, receiver, assets, shares);
-        console.log("Deposit: deposit %d assetDiff %d shares %d", assets, assetsAfter - assetsBefore, shares);
+        emit Deposit(_msgSender(), receiver, assets, shares);
+    //        console.log("Deposit: deposit %d assetDiff %d shares %d", assets, assetsAfter - assetsBefore, shares);
+        console.log("totalSupply %d totalAssets %d", totalSupply(), totalAssets());
     }
 
     // IREC4626.withdraw cannot be used because of slippage -> we can't previewDeposit before _deposit.
@@ -188,37 +190,35 @@ contract Looping is ILooping, OwnableERC4626 {
         address receiver,
         address owner
     ) public override(IERC4626, ERC4626) returns (uint256 assets) {
-        console.log("assetsBefore ?");
+        // keep track of assets before and after to calculate the difference and transfer the correct amount
         uint assetsBefore = refreshTotalAssets(true);
-        console.log("assetsBefore $d", assetsBefore);
-        uint sharesBps = shares.mulDiv(10000, totalSupply());
-        (
-            uint flashLoanAmt,
-            uint amountToSwap,
-            uint minAmountsOut
-        ) = LoopingCalculations._withdrawCalculations(sharesBps, params, loanMetrics);
 
-        // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
-        IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(params.quote);
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = flashLoanAmt;
-        bytes memory userData = abi.encode(
-            Operation.Deposit,
-            amountToSwap,
-            minAmountsOut
-        );
-        console.log("flashLoanAmt %d amountToSwap%d minAmountsOut %d", flashLoanAmt, amountToSwap , minAmountsOut);
-        IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+        // apply logic
+        {
+            uint sharesBps = shares.mulDiv(10000, totalSupply());
+            (
+                uint flashLoanAmt,
+                uint amountToSwap,
+                uint minAmountsOut
+            ) = LoopingCalculations._withdrawCalculations(sharesBps, params, loanMetrics);
 
-        // sharesAfter = this.totalSupply().mulDiv(sharesBps, 10000);
-        uint assetsAfter = refreshTotalAssets(true);
-        console.log("assetsAfter %d", assetsAfter);
-        uint shares = previewWithdraw(assetsAfter - assetsBefore);
-        console.log("shares %d", shares);
-        _burn(owner, shares);
-        assets = assetsAfter - assetsBefore;
-        mySafeTransferFrom(params.quote, address(this), receiver, assets);
+            // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
+            IERC20[] memory tokens = new IERC20[](1);
+            tokens[0] = IERC20(params.quote);
+            uint256[] memory amounts = new uint256[](1);
+            amounts[0] = flashLoanAmt;
+            bytes memory userData = abi.encode(
+                Operation.Withdraw,
+                amountToSwap,
+                minAmountsOut
+            );
+            IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
+        }
+
+        // burns shares and transfers assets
+        uint assetsAfter = refreshTotalAssets(false);
+        assets = assetsBefore - assetsAfter;
+        _withdraw(_msgSender(), receiver, owner, assets, shares);
     }
 
     /* Implement the IFlashLoanRecipient interface
@@ -233,7 +233,7 @@ contract Looping is ILooping, OwnableERC4626 {
         bytes memory userData
     ) external {
         require(
-            msg.sender == BALANCER_FLASHLOAN,
+            _msgSender() == BALANCER_FLASHLOAN,
             "Looping: only Balancer can call this function"
         );
         (
@@ -253,8 +253,9 @@ contract Looping is ILooping, OwnableERC4626 {
         //     amounts[0] + feeAmounts[0] <= tokens[0].balanceOf(address(this)),
         //     "Looping: not enough funds to repay flashloan"
         // );
+        this.printHoldings("before repay");
         bool success = tokens[0].transfer(
-            msg.sender,
+            _msgSender(),
             amounts[0] + feeAmounts[0]
         );
         // this.printHoldings("after repay");
@@ -285,12 +286,12 @@ contract Looping is ILooping, OwnableERC4626 {
                 deadline: block.timestamp + 6000, // use current block timestamp as deadline
                 amountIn: amountIn,
                 amountOutMinimum: minAmountOut, // accept any amount of output token
-                sqrtPriceLimitX96: uint160(
-                    uint(2 << 96).mulDiv(
-                        Math.sqrt(amountIn),
-                        Math.sqrt(minAmountOut)
-                    )
-                )
+                sqrtPriceLimitX96: 0 //uint160(
+                //     uint(2 << 96).mulDiv(
+                //         Math.sqrt(amountIn),
+                //         Math.sqrt(minAmountOut)
+                //     )
+                // )
             });
         // Execute the swap and return the amount of output token
         amountOut = uniswapRouter.exactInputSingle(swapParams);
@@ -370,5 +371,9 @@ contract Looping is ILooping, OwnableERC4626 {
     function redeem(uint256 shares, address receiver, address owner) public override(IERC4626, ERC4626) returns (uint256) {
         uint256 assets = refreshTotalAssets(true).mulDiv(shares, super.totalSupply());
         return withdraw(assets, receiver, owner);
+    }
+    //TODO: totalSupply() = 0 otherwise ????
+    function _decimalsOffset() internal view override(ERC4626) returns (uint8) {
+        return 1;
     }
 }

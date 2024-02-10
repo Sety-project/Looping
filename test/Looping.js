@@ -112,7 +112,8 @@ describe("Looping", function () {
     // const events = depositReceipt.logs.filter(
     //   item=>(item.address == looping.target) && (item.eventName == "Deposit"));
     // events.forEach(event => {event.topics.forEach(topic => {console.log(toBigInt(topic))})});
-    await looping.withdraw(0n, owner, owner);
+    totalSupply = await looping.totalSupply();
+    await looping.withdraw(BigInt(totalSupply), owner, owner);
     
     await expect(looping.withdraw(assets, owner, owner)).to.approximately(assets, assets * slippageBps / 10000n);
     await looping.printHoldings("js withdraw");
