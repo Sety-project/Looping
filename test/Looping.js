@@ -24,18 +24,6 @@ const {
   time,
 } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
-async function logBalances(addressToCheck, signer) {
-  const eth_balance = await ethers.provider.getBalance(addressToCheck);
-
-  const wethContract = new ethers.Contract(WETH_ADDRESS, WETH_ABI, signer);
-  const weth_balance = await wethContract.balanceOf(addressToCheck);
-
-  const wstethContract = new ethers.Contract(WSTETH_ERC20_ADDRESS, WSTETH_ERC20_ABI, signer);
-  const wsteth_balance = await wstethContract.balanceOf(addressToCheck);
-  console.log("eth_balance: %d, wsteth_balance: %d, wsteth_balance: %d", eth_balance, weth_balance, wsteth_balance);
-  return (eth_balance, weth_balance, wsteth_balance)
-}
-
 async function getWeth(signerToFund, looping) {
   // Send some ERC20 to my contract
   const eth_balance = await ethers.provider.getBalance(signerToFund);
@@ -50,16 +38,18 @@ async function getWeth(signerToFund, looping) {
   const new_eth_balance = await ethers.provider.getBalance(signerToFund);
   await wethContract.approve(looping, new_weth_balance);
 
-  console.log("WethValue: %d ethValue: %d",new_weth_balance, new_eth_balance);
+  console.log("signerToFund: %s WethValue: %d ethValue: %d",signerToFund.address, new_weth_balance, new_eth_balance);
+  
   return (eth_balance, weth_balance)
 }
 
 describe("Looping", function () {
+  const assets = 1000000000000000000n;
   const max_ltv = 7000n;
   const slippage = 100n;
 
   async function deployAndFundFixture() {
-    const [owner, otherAccount] = await ethers.getSigners();
+    const [owner, userAccount, attacker] = await ethers.getSigners();
     
     const Looping = await ethers.getContractFactory("Looping", 
     { signer: owner});
@@ -68,21 +58,18 @@ describe("Looping", function () {
     const looping = await Looping.deploy(WETH_ADDRESS, WSTETH_ADDRESS, max_ltv, slippage);
 
     // here we get some WETH and send allowance tx
-    await getWeth(owner, looping);
-    await getWeth(otherAccount, looping);
+    await getWeth(userAccount, looping);
 
-    return { looping, owner, otherAccount };
+    return { looping, owner, userAccount, attacker };
   }
 
   it("Should run constructor", async function () {
-    const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
-    const {quoteBalance, baseBalance, totalCollateralBase, totalDebtBase} = await looping.printHoldings("constructor");
-    console.log("quoteHolding: %d, baseHolding: %d", quoteBalance, baseBalance);
+    await loadFixture(deployAndFundFixture);
   });
 
   it("Should get oracle value", async function () {
-    const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
-    const aaveOracleContract = new ethers.Contract(AAVEORACLE_ADDRESS, AAVEORACLE_ABI, owner);
+    const [owner, userAccount] = await ethers.getSigners();
+    const aaveOracleContract = new ethers.Contract(AAVEORACLE_ADDRESS, AAVEORACLE_ABI, userAccount);
     const WethValue = await aaveOracleContract.getAssetPrice(WETH_ADDRESS);
     const WstethValue = await aaveOracleContract.getAssetPrice(WSTETH_ADDRESS);
     
@@ -91,43 +78,31 @@ describe("Looping", function () {
   });
 
   it("Should deposit", async function () {
-    const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
-    
-    const aaveOracleContract = new ethers.Contract(AAVEORACLE_ADDRESS, AAVEORACLE_ABI, owner);
-    const WethValue = await aaveOracleContract.getAssetPrice(WETH_ADDRESS);
-    const WstethValue = await aaveOracleContract.getAssetPrice(WSTETH_ADDRESS);
-
-    const assets = 1000000000000000000n;
-    await looping.deposit(assets, owner.address);  
-    // await looping.printHoldings("js deposit1");
+    const { looping, owner, userAccount, attacker  } = await loadFixture(deployAndFundFixture);
+    expect(await looping.connect(userAccount).deposit(assets, userAccount.address)).to.emit(looping, "Deposit");
   });
 
-  it("Should deposit and withdraw", async function () {
-    const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
-    const assets = 1000000000000000000n;
-    const slippageBps = 100n;
+  it("Should deposit and redeem", async function () {
+    const { looping, owner, userAccount, attacker  } = await loadFixture(deployAndFundFixture);
     
-    const depositResponse = await looping.deposit(assets, owner.address);
-    // const depositReceipt = await depositResponse.wait();
-    // const events = depositReceipt.logs.filter(
-    //   item=>(item.address == looping.target) && (item.eventName == "Deposit"));
-    // events.forEach(event => {event.topics.forEach(topic => {console.log(toBigInt(topic))})});
-    totalSupply = await looping.totalSupply();
-    await looping.withdraw(BigInt(totalSupply), owner, owner);
-    
-    await expect(looping.withdraw(assets, owner, owner)).to.approximately(assets, assets * slippageBps / 10000n);
-    await looping.printHoldings("js withdraw");
+    const sharesTx = await looping.connect(userAccount).deposit(assets, userAccount.address);
+    sharesReceipt = await sharesTx.wait();
+    const shares = sharesReceipt.logs.filter((event)=>{return event.eventName=="Deposit"})[0].args[3]
 
-    await expect(looping.withdraw(assets, otherAccount, owner)).to.be.revertedWithCustomError(looping, "ERC4626ExceededMaxWithdraw");
-    await looping.printHoldings("js other withdraw");
+    const redeemTx = await looping.connect(userAccount).redeem(shares, userAccount.address, userAccount.address);
+    redeemReceipt = await redeemTx.wait();
+    const redeemedAssets = redeemReceipt.logs.filter((event)=>{return event.eventName=="Withdraw"})[0].args[3]
+ 
+    expect(redeemedAssets).to.approximately(assets, assets * slippage / 10000n);
   });
 
-  it("Should revert with the right error if called from another account", async function () {
-    const { looping, owner, otherAccount } = await loadFixture(deployAndFundFixture);
-
-    // We use looping.connect() to send a transaction from another account
-    await expect(looping.connect(otherAccount).withdraw()).to.be.revertedWith(
-      "You aren't the owner"
-    );
+  it("Should revert on redeem attack", async function () {
+    const { looping, owner, userAccount, attacker  } = await loadFixture(deployAndFundFixture);
+    
+    const sharesTx = await looping.connect(userAccount).deposit(assets, userAccount.address);
+    sharesReceipt = await sharesTx.wait();
+    const shares = sharesReceipt.logs.filter((event)=>{return event.eventName=="Deposit"})[0].args[3]
+  
+    await expect(looping.connect(attacker).redeem(shares/10n, attacker, userAccount)).to.be.reverted;
   });
 });

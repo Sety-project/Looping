@@ -33,20 +33,12 @@ address constant UNISWAP_SWAP = address(
 );
 ISwapRouter constant uniswapRouter = ISwapRouter(UNISWAP_SWAP);
 
-// bytes32 constant BALANCER_POOL_ID =
-//     bytes32(
-//         uint256(
-//             0x36bf227d6bac96e2ab1ebb5492ecec69c691943f000200000000000000000316
-//         )
-//     );
-
 contract Looping is ILooping, OwnableERC4626 {
     using Math for uint256;
 
-    Params private params;
-    LoanMetrics private loanMetrics;
-    address private immutable quoteaAToken;
-    address private immutable baseVariableDebtToken;
+    Params private _params;
+    address private immutable _quoteaAToken;
+    address private immutable _baseVariableDebtToken;
 
     constructor(
         address quote,
@@ -54,93 +46,49 @@ contract Looping is ILooping, OwnableERC4626 {
         uint256 ltv,
         uint256 slippage
     ) OwnableERC4626(quote) {
-        params.quote = quote;
-        params.base = base;
-        params.ltv = ltv;
-        params.slippage = slippage; // slippage includes fees
-        params.interestRateMode = DataTypes.InterestRateMode.VARIABLE;
+        _params.quote = quote;
+        _params.base = base;
+        _params.ltv = ltv;
+        _params.slippage = slippage; // slippage includes fees
+        _params.interestRateMode = DataTypes.InterestRateMode.VARIABLE;
         IPool(AAVE).setUserEMode(0);
-        quoteaAToken = (IPool(AAVE).getReserveData(base)).aTokenAddress;
-        baseVariableDebtToken = (IPool(AAVE).getReserveData(quote)).variableDebtTokenAddress;
+        _quoteaAToken = (IPool(AAVE).getReserveData(base)).aTokenAddress;
+        _baseVariableDebtToken = (IPool(AAVE).getReserveData(quote)).variableDebtTokenAddress;
     }
 
     function setExecutionParams(
         uint16 ltv,
         uint16 slippage
     ) external onlyOwner {
-        params.ltv = ltv;
-        params.slippage = slippage;
+        _params.ltv = ltv;
+        _params.slippage = slippage;
     }
 
     function getParams() external view returns (ILooping.Params memory) {
-        return params;
+        return _params;
     }
-
-    // make sure to call this before any external call
-    function _cacheLoanInfo(bool checkNoCash) private {
-        loanMetrics.basePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(params.base);
-        loanMetrics.quotePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(params.quote);
-        loanMetrics.quoteBalance = IERC20(params.quote).balanceOf(address(this));
-        loanMetrics.baseBalance = IERC20(params.base).balanceOf(address(this));
-        // if (checkNoCash) {
-        //     require(
-        //         loanMetrics.quoteBalance == 0 && loanMetrics.baseBalance == 0,
-        //         "contract shouldn't hold cash at this point"
-        //     );
-        // }
-        loanMetrics.totalCollateral = IERC20(quoteaAToken).balanceOf(address(this));
-        loanMetrics.totalDebt = IERC20(baseVariableDebtToken).balanceOf(address(this));
-
-        emit PrintHoldings(
-            loanMetrics.quoteBalance,
-            loanMetrics.baseBalance,
-            loanMetrics.totalCollateral,
-            loanMetrics.totalDebt
-        );
-    }
-
-    // this refreshes cache, so is not view
-    function printHoldings(string memory text) external {
-        _cacheLoanInfo(false);        
-        string memory concatenated = string(
-            abi.encodePacked(
-                "quoteBalance ",
-                Strings.toString(loanMetrics.quoteBalance),
-                " baseBalance ",
-                Strings.toString(loanMetrics.baseBalance),
-                " totalCollateral ",
-                Strings.toString(loanMetrics.totalCollateral),
-                " totalDebt ",
-                Strings.toString(loanMetrics.totalDebt)
-            )
-        );
-        console.log("%s: %s", text, concatenated);
-    }
-
-    /* tricky and unsafe ! 
+    
+    /* tricky ! 
     super.totalAssets() was _asset.balanceOf(address(this)) but we do not hold on to quote in this contract:
-    what we need is the net valuation
-    BUT: we can't force a refresh upon calling it from outside since it overrides a view function...*/
-    function totalAssets()
-        public
-        view
-        override(IERC4626, ERC4626)
-        returns (uint256)
-    {
-        assert(IERC20(params.base).balanceOf(address(this)) == 0); // we do not hold on to quote in this contract
+    what we need is the net valuation*/
+    function _calculateTotalAssets(LoanMetrics memory loanMetrics) internal view returns (uint256) {
+        assert(IERC20(_params.base).balanceOf(address(this)) == 0); // we do not hold on to quote in this contract
         return
             loanMetrics.totalCollateral.mulDiv(
                 loanMetrics.basePrice,
                 loanMetrics.quotePrice
             )
             - loanMetrics.totalDebt
-            + IERC20(params.quote).balanceOf(address(this));
-        // + IERC20(params.base).balanceOf(address(this)).mulDiv(loanMetrics.basePrice, loanMetrics.quotePrice);
+            + IERC20(_params.quote).balanceOf(address(this))
+            + IERC20(_params.base).balanceOf(address(this)).mulDiv(loanMetrics.basePrice, loanMetrics.quotePrice);
     }
-    // but at least internal calls can force a refresh
-    function refreshTotalAssets(bool checkNoCash) public returns (uint256) {
-        _cacheLoanInfo(checkNoCash);
-        return totalAssets();
+    function _calculateLoanMetrics() private view returns (LoanMetrics memory loanMetrics){
+        loanMetrics.basePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_params.base);
+        loanMetrics.quotePrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(_params.quote);
+        loanMetrics.quoteBalance = IERC20(_params.quote).balanceOf(address(this));
+        loanMetrics.baseBalance = IERC20(_params.base).balanceOf(address(this));
+        loanMetrics.totalCollateral = IERC20(_quoteaAToken).balanceOf(address(this));
+        loanMetrics.totalDebt = IERC20(_baseVariableDebtToken).balanceOf(address(this));
     }
 
     // IREC4626.deposit cannot be used because of slippage -> we can't previewDeposit before _deposit.
@@ -148,19 +96,20 @@ contract Looping is ILooping, OwnableERC4626 {
         uint256 assets,
         address receiver
     ) public override(IERC4626, ERC4626) returns (uint256 shares) {
-        uint assetsBefore = refreshTotalAssets(true);
-        mySafeTransferFrom(params.quote, receiver, address(this), assets);
+        LoanMetrics memory loanMetricsBefore = _calculateLoanMetrics();
+        uint assetsBefore = _calculateTotalAssets(loanMetricsBefore);
+        mySafeTransferFrom(_params.quote, receiver, address(this), assets);
         
         {
             (
                 uint flashLoanAmt,
                 uint amountToSwap,
                 uint minAmountsOut
-            ) = LoopingCalculations._depositCalculations(assets, params, loanMetrics);
+            ) = LoopingCalculations._depositCalculations(assets, _params, loanMetricsBefore);
 
             // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
             IERC20[] memory tokens = new IERC20[](1);
-            tokens[0] = IERC20(params.quote);
+            tokens[0] = IERC20(_params.quote);
             uint256[] memory amounts = new uint256[](1);
             amounts[0] = flashLoanAmt;
             bytes memory userData = abi.encode(
@@ -173,38 +122,39 @@ contract Looping is ILooping, OwnableERC4626 {
             IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
         }
 
-        // mint based on assets AFTER costs
-        uint assetsAfter = refreshTotalAssets(true);
-
-        shares = previewDeposit(assetsAfter - assetsBefore);
+        // mint based on assets AFTER costs; cannot use previewDeposit because of slippage
+        LoanMetrics memory loanMetrics = _calculateLoanMetrics();
+        uint assetsAfter = _calculateTotalAssets(loanMetrics);
+        shares = (assetsAfter - assetsBefore).mulDiv(totalSupply() + 10 ** _decimalsOffset(), assetsBefore + 1, Math.Rounding.Floor);
+        
         _mint(receiver, shares);
 
         emit Deposit(_msgSender(), receiver, assets, shares);
-    //        console.log("Deposit: deposit %d assetDiff %d shares %d", assets, assetsAfter - assetsBefore, shares);
-        console.log("totalSupply %d totalAssets %d", totalSupply(), totalAssets());
     }
 
     // IREC4626.withdraw cannot be used because of slippage -> we can't previewDeposit before _deposit.
-    function withdraw(
+    function redeem(
         uint256 shares,
         address receiver,
         address owner
-    ) public override(IERC4626, ERC4626) returns (uint256 assets) {
-        // keep track of assets before and after to calculate the difference and transfer the correct amount
-        uint assetsBefore = refreshTotalAssets(true);
-
+    ) public override(IERC4626, ERC4626) returns (uint256 assets) {     
+        uint256 maxShares = maxRedeem(owner);
+        if (shares > maxShares) {
+            revert ERC4626ExceededMaxRedeem(owner, shares, maxShares);
+        }
         // apply logic
         {
+            LoanMetrics memory loanMetricsBefore = _calculateLoanMetrics();
             uint sharesBps = shares.mulDiv(10000, totalSupply());
             (
                 uint flashLoanAmt,
                 uint amountToSwap,
                 uint minAmountsOut
-            ) = LoopingCalculations._withdrawCalculations(sharesBps, params, loanMetrics);
+            ) = LoopingCalculations._withdrawCalculations(sharesBps, _params, loanMetricsBefore);
 
             // Flashloan will call receiveFlashLoan(), where the rest of the logic will be executed
             IERC20[] memory tokens = new IERC20[](1);
-            tokens[0] = IERC20(params.quote);
+            tokens[0] = IERC20(_params.quote);
             uint256[] memory amounts = new uint256[](1);
             amounts[0] = flashLoanAmt;
             bytes memory userData = abi.encode(
@@ -215,9 +165,8 @@ contract Looping is ILooping, OwnableERC4626 {
             IVault(BALANCER_FLASHLOAN).flashLoan(this, tokens, amounts, userData);
         }
 
-        // burns shares and transfers assets
-        uint assetsAfter = refreshTotalAssets(false);
-        assets = assetsBefore - assetsAfter;
+        // burns shares and transfers quote
+        assets = IERC20(_params.quote).balanceOf(address(this));
         _withdraw(_msgSender(), receiver, owner, assets, shares);
     }
 
@@ -248,19 +197,11 @@ contract Looping is ILooping, OwnableERC4626 {
             _deleverage(amounts[0], amountToSwap, minAmountsOut);
         }
 
-        // repay the flashloan
-        // require(
-        //     amounts[0] + feeAmounts[0] <= tokens[0].balanceOf(address(this)),
-        //     "Looping: not enough funds to repay flashloan"
-        // );
-        this.printHoldings("before repay");
+        // repay flashloan
         bool success = tokens[0].transfer(
             _msgSender(),
             amounts[0] + feeAmounts[0]
         );
-        // this.printHoldings("after repay");
-        // require(success, "Looping: failed to repay flashloan");
-        // console.log("flashloan repaid");
     }
 
     function _swapExactInputSingle(
@@ -302,33 +243,29 @@ contract Looping is ILooping, OwnableERC4626 {
         uint amountToSwap,
         uint minAmountsOut
     ) private {
-        // swap params.quote for base
+        // swap _params.quote for base
         uint256 amountCalculated = _swapExactInputSingle(
-            params.quote,
-            params.base,
+            _params.quote,
+            _params.base,
             uniswap_fee,
             amountToSwap,
             minAmountsOut
         );
         // deposit base into AAVE
-        if (IERC20(params.base).allowance(address(this), AAVE) < amountCalculated)
+        if (IERC20(_params.base).allowance(address(this), AAVE) < amountCalculated)
         {
-            bool success = IERC20(params.base).approve(AAVE, amountCalculated);
-            // require(success, "Looping: failed to approve stETH for AAVE");
+            bool success = IERC20(_params.base).approve(AAVE, amountCalculated);
+            require(success, "Looping: failed to approve stETH for AAVE");
         }
-        // this.printHoldings("before supply");
-        IPool(AAVE).supply(params.base, amountCalculated, address(this), 0);
-        // DataTypes.ReserveData memory reserveData = IPool(AAVE).getReserveData(address(this));
-        // this.printHoldings("after supply");
-        // borrow asset from AAVE to repay flashloan
+        IPool(AAVE).supply(_params.base, amountCalculated, address(this), 0);
+
         IPool(AAVE).borrow(
-            params.quote,
+            _params.quote,
             flashLoanAmt,
-            uint256(params.interestRateMode),
+            uint256(_params.interestRateMode),
             0,
             address(this)
         );
-        // this.printHoldings("after borrow");
     }
 
     function _deleverage(
@@ -336,44 +273,42 @@ contract Looping is ILooping, OwnableERC4626 {
         uint amountToSwap,
         uint minAmountsOut
     ) private {
-        // repay params.quote from AAVE
+        // repay _params.quote from AAVE
         uint amountToRepay = flashLoanAmt;
-        if (IERC20(params.quote).allowance(address(this),AAVE) < amountToRepay) {
-            bool success = IERC20(params.quote).approve(AAVE, amountToRepay);
-            // require(success, "Looping: failed to approve stETH for AAVE");
+        if (IERC20(_params.quote).allowance(address(this),AAVE) < amountToRepay) {
+            bool success = IERC20(_params.quote).approve(AAVE, amountToRepay);
+            require(success, "Looping: failed to approve WETH for AAVE");
         }
         IPool(AAVE).repay(
-            params.quote,
+            _params.quote,
             amountToRepay,
-            uint256(params.interestRateMode),
+            uint256(_params.interestRateMode),
             address(this)
         );
         
         // withdraw base from AAVE
         uint unsupplyAmt = amountToSwap;
-        IPool(AAVE).withdraw(params.base, unsupplyAmt, address(this));
+        IPool(AAVE).withdraw(_params.base, unsupplyAmt, address(this));
 
-        // swap base for params.quote
+        // swap base for _params.quote
         _swapExactInputSingle(
-            params.base,
-            params.quote,
+            _params.base,
+            _params.quote,
             uniswap_fee,
             amountToSwap,
             minAmountsOut
         );
     }
 
-    // not 100% sure about those....
+    // don't use those for now because preview painful to implement
     function mint(uint256 shares, address receiver) public override(IERC4626, ERC4626) returns (uint256) {
-        uint256 assets = refreshTotalAssets(true).mulDiv(shares, super.totalSupply());
-        return deposit(assets, receiver);
+        revert FunctionNotImplemented("mint");
     }
-    function redeem(uint256 shares, address receiver, address owner) public override(IERC4626, ERC4626) returns (uint256) {
-        uint256 assets = refreshTotalAssets(true).mulDiv(shares, super.totalSupply());
-        return withdraw(assets, receiver, owner);
+    function withdraw(uint256 assets, address receiver, address owner) public override(IERC4626, ERC4626) returns (uint256) {
+        revert FunctionNotImplemented("withdraw");
     }
-    //TODO: totalSupply() = 0 otherwise ????
-    function _decimalsOffset() internal view override(ERC4626) returns (uint8) {
-        return 1;
+    // blocking this will block all the other functions we don't want to implement
+    function totalAssets() public view override(IERC4626, ERC4626) returns (uint256) {
+        revert FunctionNotImplemented("totalAssets");
     }
 }

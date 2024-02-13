@@ -5,7 +5,7 @@
 // will compile your contracts, add the Hardhat Runtime Environment's members to the
 // global scope, and execute the script.
 const { ethers } = require("hardhat");
-// require('hardhat-ethernal');
+require('hardhat-upgrades');
 
 async function main() {
   const asset = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1";

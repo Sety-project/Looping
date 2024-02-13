@@ -30,16 +30,9 @@ interface ILooping is IERC4626, IFlashLoanRecipient {
         Withdraw
     }
 
-    event PrintHoldings(
-        uint256 quoteBalance,
-        uint256 baseBalance,
-        uint256 totalCollateral,
-        uint256 totalDebt
-    );
+    error FunctionNotImplemented(string text);
 
     function getParams() external view returns (ILooping.Params memory);
-
-    function printHoldings(string memory text) external;
 
     function receiveFlashLoan(
         IERC20[] memory tokens,
