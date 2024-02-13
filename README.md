@@ -1,6 +1,7 @@
 # Looping
 
-This is a mulitasset ERC4626 supporting lend and borrow. A leverage strat is executed / unwound upon deposit / withdraw. This is WIP and still exploitable, coverage about 50%, and ERC4626 compatibility is only partially satisfied...
+This is a mulitasset ERC4626 supporting lend and borrow. A leverage strat is executed / unwound upon deposit / withdraw. This is WIP and still exploitable, coverage about 50%, and ERC4626 compatibility is only partially satisfied.
+It has been deployed to arb:0xca2b23d3cb0c22a745fd8c7a1049f7d199783ae1
 
 ## deposit
 
